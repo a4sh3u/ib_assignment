@@ -1,0 +1,220 @@
+---
+  Description: "Creates ASG with scaling poilicies"
+
+  Parameters:
+    ScalingMax:
+      Description: "Max Size for the ASG"
+      Type: String
+    ScalingMin:
+      Description: "Min Size for the ASG"
+      Type: String
+    DesiredCapacity:
+      Description: "Desired capacity for the ASG"
+      Type: String
+    AppSubnet:
+      Description: "List the Subnet Ids of the instances"
+      Type: List<AWS::EC2::Subnet::Id>
+    KeyName:
+      Description: "EC2 instance key name"
+      Type: String
+    InstanceType:
+      Description: "EC2 instance type"
+      Type: String
+    InstanceSecurityGroup:
+      Description: "List of Security Group IDs"
+      Type: List<AWS::EC2::SecurityGroup::Id>
+    HealthCheckGracePeriod:
+      Description: "Health check period for ASG Instances"
+      Type: Number
+    HealthCheckType:
+      Description: "Health check type for instances"
+      Type: String
+      AllowedValues:
+        - ELB
+        - EC2
+    EC2ScaleDownCooldown:
+      Description: "EC2 instance scale down cooldown period"
+      Type: String
+    EC2ScaleUpCooldown:
+      Description: "EC2 instance scale up cooldown period"
+      Type: String
+    EC2ScaleUpAdjustment:
+      Description: "EC2 instance scale up Adjustment"
+      Type: Number
+    EC2ScaleDownAdjustment:
+      Description: "EC2 instance scale down Adjustment"
+      Type: Number
+    MinInstancesInService:
+      Description: "Minimum EC2 instance"
+      Type: Number
+    TerminatedInstances:
+      Description: "Termination policies"
+      Type: String
+      AllowedValues:
+        - OldestInstance
+        - OldestLaunchConfiguration
+        - NewestInstance
+        - ClosestToNextInstanceHour
+        - Default
+        - OldestLaunchTemplate
+        - AllocationStrategy
+    ScalingCreateTimeOut:
+      Description: "Scaling create Timeout"
+      Type: String
+    ScalingUpdateTimeOut:
+      Description: "Scaling Update Timeout"
+      Type: String
+    OperatorEmail:
+      Description: Email address to notify if there are any scaling operations
+      Type: String
+      AllowedPattern: ([a-zA-Z0-9_\-\.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([a-zA-Z0-9\-]+\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\]?)
+      ConstraintDescription: must be a valid email address.
+    NFSLocation:
+      Description: NFS location
+      Type: String
+      Default: 'nfs.example.com:/data'
+
+  Mappings:
+    RegionMap:
+      us-east-1:
+        HVM64: "ami-0ff8a91507f77f867"
+      us-west-1:
+        HVM64: "ami-0bdb828fd58c52235"
+
+  Resources:
+    NotificationTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        Subscription:
+        - Endpoint: !Ref 'OperatorEmail'
+          Protocol: email
+    AutoScalingGroup:
+      Type: AWS::AutoScaling::AutoScalingGroup
+      Properties:
+        AutoScalingGroupName: Test Autoscaling Group
+        DesiredCapacity:
+          Ref: DesiredCapacity
+        LaunchConfigurationName: TestLaunchConfiguration
+        MaxSize:
+          Ref: ScalingMax
+        MinSize:
+          Ref: ScalingMin
+        HealthCheckGracePeriod:
+          Ref: HealthCheckGracePeriod
+        HealthCheckType:
+          Ref: HealthCheckType
+        TerminationPolicies:
+        - Ref: TerminatedInstances
+        NotificationConfigurations:
+          - TopicARN:
+              Ref: NotificationTopic
+            NotificationTypes: ['autoscaling:EC2_INSTANCE_LAUNCH', 'autoscaling:EC2_INSTANCE_LAUNCH_ERROR',
+            'autoscaling:EC2_INSTANCE_TERMINATE', 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR']
+        Tags:
+          -
+            Key: Name
+            Value: Test ASG
+            PropagateAtLaunch: 'true'
+        VPCZoneIdentifier:
+          Ref: AppSubnet
+      CreationPolicy:
+        ResourceSignal:
+          Timeout:
+            Ref: ScalingCreateTimeOut
+          Count: 1
+      UpdatePolicy:
+        AutoScalingRollingUpdate:
+          MinInstancesInService: 1
+          MaxBatchSize: 1
+          PauseTime:
+            Ref: ScalingUpdateTimeOut
+          WaitOnResourceSignals: true
+    LaunchConfig:
+      Type: AWS::AutoScaling::LaunchConfiguration
+      Properties:
+        KeyName:
+          Ref: KeyName
+        ImageId: !FindInMap [ RegionMap, !Ref "AWS::Region", HVM64 ]
+        SecurityGroups:
+          Ref: "InstanceSecurityGroup"
+        InstanceType:
+          Ref: "InstanceType"
+        LaunchConfigurationName: TestLaunchConfiguration
+        UserData:
+          Fn::Base64:
+            !Join
+              - ""
+              -
+                - "#!/bin/bash -xe\n"
+                - "sudo mkdir /mnt/efs\n"
+                - !Sub ["sudo mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${NFSLocation} /mnt/efs", NFSLocation: !Ref "NFSLocation"]
+    ScaleUpPolicy:
+      Type: AWS::AutoScaling::ScalingPolicy
+      DependsOn:
+      - AutoScalingGroup
+      Properties:
+        AdjustmentType: ChangeInCapacity
+        AutoScalingGroupName:
+          Ref: AutoScalingGroup
+        Cooldown:
+          Ref: EC2ScaleUpCooldown
+        MinAdjustmentMagnitude:
+          Ref: MinInstancesInService
+        ScalingAdjustment:
+          Ref: EC2ScaleUpAdjustment
+    ScaleDownPolicy:
+      Type: AWS::AutoScaling::ScalingPolicy
+      DependsOn:
+      - AutoScalingGroup
+      Properties:
+        AdjustmentType: ChangeInCapacity
+        AutoScalingGroupName:
+          Ref: AutoScalingGroup
+        MinAdjustmentMagnitude:
+          Ref: MinInstancesInService
+        Cooldown:
+          Ref: EC2ScaleDownCooldown
+        ScalingAdjustment:
+          Ref: EC2ScaleDownAdjustment
+    CPUAlarmHigh:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmDescription: Scale-up if CPU > 90% for 10 minutes
+        MetricName: CPUUtilization
+        Namespace: AWS/EC2
+        Statistic: Average
+        Period: 300
+        EvaluationPeriods: 2
+        Threshold: 90
+        AlarmActions: [!Ref 'ScaleUpPolicy']
+        Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: AutoScalingGroup
+        ComparisonOperator: GreaterThanThreshold
+    CPUAlarmLow:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmDescription: Scale-down if CPU < 70% for 10 minutes
+        MetricName: CPUUtilization
+        Namespace: AWS/EC2
+        Statistic: Average
+        Period: 300
+        EvaluationPeriods: 2
+        Threshold: 70
+        AlarmActions: [!Ref 'ScaleDownPolicy']
+        Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: AutoScalingGroup
+        ComparisonOperator: LessThanThreshold
+
+  Outputs:
+    AutoscalingGroup:
+      Description: "The newly created asg"
+      Value:
+        Ref: "AutoScalingGroup"
+    LaunchConfig:
+      Description: "the newly created launch config"
+      Value:
+        Ref: "LaunchConfig"
